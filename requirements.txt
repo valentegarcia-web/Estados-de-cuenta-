@@ -1,5 +1,4 @@
 streamlit
+pdfplumber
 pandas
-plotly
-fpdf
-xlsxwriter
+openpyxl
