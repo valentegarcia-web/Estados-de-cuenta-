@@ -1,6 +1,5 @@
 import streamlit as st
 import pdfplumber
-import os
 import re
 import io
 from copy import copy
@@ -20,7 +19,49 @@ MESES = {
 MESES_INV = {v: k for k, v in MESES.items()}
 
 # ============================================================
-# FUNCIONES DE EXTRACCIÓN (IDÉNTICAS A TU CÓDIGO)
+# ESCUDOS PARA CELDAS COMBINADAS (SOLUCIÓN A TU ERROR)
+# ============================================================
+def leer_celda(ws, row, col):
+    """Lee el valor real incluso si la celda está combinada."""
+    celda = ws.cell(row, col)
+    if type(celda).__name__ == 'MergedCell':
+        for rng in ws.merged_cells.ranges:
+            if rng.min_col <= col <= rng.max_col and rng.min_row <= row <= rng.max_row:
+                return ws.cell(rng.min_row, rng.min_col).value
+    return celda.value
+
+def actualizar_celda(ws, row, col, value, forzar=False):
+    """Escribe en una celda de manera segura (descombina, escribe y re-combina)."""
+    val_actual = leer_celda(ws, row, col)
+    
+    # Preservar fórmulas existentes
+    if not forzar and isinstance(val_actual, str) and str(val_actual).startswith("="):
+        return
+
+    target_row, target_col = row, col
+    merge_range_str = None
+    
+    for rng in list(ws.merged_cells.ranges):
+        if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
+            target_row, target_col = rng.min_row, rng.min_col
+            merge_range_str = str(rng)
+            break
+
+    if merge_range_str:
+        try: ws.unmerge_cells(merge_range_str)
+        except Exception: pass
+        
+    try:
+        ws.cell(target_row, target_col).value = value
+    except Exception:
+        pass
+        
+    if merge_range_str:
+        try: ws.merge_cells(merge_range_str)
+        except Exception: pass
+
+# ============================================================
+# FUNCIONES DE EXTRACCIÓN (TU LÓGICA INTACTA)
 # ============================================================
 def extraer_numeros(texto):
     nums = re.findall(r"[\d,]+\.\d+", texto)
@@ -204,9 +245,6 @@ def extraer_periodo_pdf(pdf, plataforma):
                     "periodo": f"{dia_ini:02d}-{dia_fin} {nombre_mes[:3]} DE {anio}"}
     return None
 
-# ============================================================
-# PASO 1: EXTRAER DATOS DE LOS PDFs SUBIDOS
-# ============================================================
 def extraer_todos_los_pdfs_en_memoria(archivos_pdf):
     clientes = defaultdict(lambda: {
         "gbm": None, "smart_cash": None, "prestadero": None, "periodo": None
@@ -327,7 +365,7 @@ def instrumentos_coinciden(nombre_pdf, nombre_master):
 
 def encontrar_fila(ws, texto_buscar, col=1, rango=(1, 50)):
     for r in range(rango[0], rango[1]):
-        v = ws.cell(r, col).value
+        v = leer_celda(ws, r, col)
         if v and texto_buscar in str(v).upper():
             return r
     return None
@@ -335,31 +373,6 @@ def encontrar_fila(ws, texto_buscar, col=1, rango=(1, 50)):
 def valor_numerico(v, default=0.0):
     if isinstance(v, (int, float)): return float(v)
     return default
-
-def actualizar_celda(ws, row, col, value, forzar=False):
-    from openpyxl.cell.cell import MergedCell
-    target_row, target_col = row, col
-    merge_range = None
-    for rng in list(ws.merged_cells.ranges):
-        if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
-            target_row, target_col = rng.min_row, rng.min_col
-            merge_range = rng
-            break
-    celda = ws.cell(target_row, target_col)
-    if isinstance(celda, MergedCell) and merge_range:
-        try: ws.unmerge_cells(str(merge_range))
-        except Exception: pass
-        celda = ws.cell(target_row, target_col)
-    if not forzar and isinstance(celda.value, str) and str(celda.value).startswith("="):
-        return
-    try:
-        celda.value = value
-    except AttributeError:
-        for rng in list(ws.merged_cells.ranges):
-            if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
-                try: ws.unmerge_cells(str(rng))
-                except Exception: pass
-        ws.cell(row, col).value = value
 
 def copiar_formato_fila(ws, fila_origen, fila_destino):
     from openpyxl.cell.cell import MergedCell
@@ -391,55 +404,56 @@ def insertar_instrumento(ws, fila_totales, datos, fila_ref, periodo):
     f = (e / b) if b > 0 else 0.0
     g = c - 0 + venta - compra
     h = (g / b) if b > 0 else 0.0
-    ws.cell(nueva_fila, 1).value = emisora
-    ws.cell(nueva_fila, 2).value = round(b, 2)
-    ws.cell(nueva_fila, 3).value = round(c, 2)
+    
+    actualizar_celda(ws, nueva_fila, 1, emisora)
+    actualizar_celda(ws, nueva_fila, 2, round(b, 2))
+    actualizar_celda(ws, nueva_fila, 3, round(c, 2))
     if periodo:
-        ws.cell(nueva_fila, 4).value = f"{periodo['mes_nombre'].lower()} {periodo['anio']}"
-    ws.cell(nueva_fila, 5).value = round(e, 2)
-    ws.cell(nueva_fila, 6).value = round(f, 10)
-    ws.cell(nueva_fila, 7).value = round(g, 2)
-    ws.cell(nueva_fila, 8).value = round(h, 10)
-    ws.cell(nueva_fila, 9).value = "CONSERVADOR\nESPECULATIVO"
-    ws.cell(nueva_fila, 10).value = round(venta, 2)
-    ws.cell(nueva_fila, 11).value = round(compra, 2)
-    ws.cell(nueva_fila, 14).value = round(c, 2)
-    ws.cell(nueva_fila, 15).value = "GBM"
+        actualizar_celda(ws, nueva_fila, 4, f"{periodo['mes_nombre'].lower()} {periodo['anio']}")
+    actualizar_celda(ws, nueva_fila, 5, round(e, 2))
+    actualizar_celda(ws, nueva_fila, 6, round(f, 10))
+    actualizar_celda(ws, nueva_fila, 7, round(g, 2))
+    actualizar_celda(ws, nueva_fila, 8, round(h, 10))
+    actualizar_celda(ws, nueva_fila, 9, "CONSERVADOR\nESPECULATIVO")
+    actualizar_celda(ws, nueva_fila, 10, round(venta, 2))
+    actualizar_celda(ws, nueva_fila, 11, round(compra, 2))
+    actualizar_celda(ws, nueva_fila, 14, round(c, 2))
+    actualizar_celda(ws, nueva_fila, 15, "GBM")
     return fila_totales + 1
 
 def expandir_formulas_totales(ws, fila_totales):
     patron = re.compile(r"(SUM\([A-Z]+)(\d+)(:[A-Z]+)(\d+)(\))")
     nueva_fin = fila_totales - 1
     for col in range(2, 16):
-        celda = ws.cell(fila_totales, col)
-        val = celda.value
+        val = leer_celda(ws, fila_totales, col)
         if not isinstance(val, str) or not val.startswith("="): continue
         nueva_formula = patron.sub(
             lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}{nueva_fin}{m.group(5)}",
             val,
         )
         if nueva_formula != val:
-            celda.value = nueva_formula
+            actualizar_celda(ws, fila_totales, col, nueva_formula, forzar=True)
 
 def _actualizar_formulas_header(ws, fila_header, fila_totales, ultima_instr):
     patron_sum = re.compile(r"(=SUM\([A-Z]+)(\d+)(:[A-Z]+)(\d+)(\))")
-    celda_h9 = ws.cell(9, 8)
-    val_h9 = celda_h9.value
+    val_h9 = leer_celda(ws, 9, 8)
     if isinstance(val_h9, str) and val_h9.startswith("=SUM("):
         nueva = patron_sum.sub(
             lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}{ultima_instr}{m.group(5)}",
             val_h9,
         )
-        if nueva != val_h9: celda_h9.value = nueva
-    j9 = ws.cell(9, 10).value
+        if nueva != val_h9: 
+            actualizar_celda(ws, 9, 8, nueva, forzar=True)
+            
+    j9 = leer_celda(ws, 9, 10)
     if isinstance(j9, str) and j9.startswith("=C"):
-        ws.cell(9, 10).value = f"=C{fila_totales}-I9"
+        actualizar_celda(ws, 9, 10, f"=C{fila_totales}-I9", forzar=True)
 
 def leer_instrumentos_master(ws, fila_header, fila_totales):
     instrumentos = []
     r = fila_header + 1
     while r < fila_totales:
-        nombre = ws.cell(r, 1).value
+        nombre = leer_celda(ws, r, 1)
         if nombre and str(nombre).strip() and str(nombre).strip() != "-":
             fila_fin = r
             for rng in ws.merged_cells.ranges:
@@ -448,13 +462,13 @@ def leer_instrumentos_master(ws, fila_header, fila_totales):
                     break
             instrumentos.append({
                 "fila": r, "fila_fin": fila_fin, "nombre": str(nombre).strip(),
-                "B": ws.cell(r, 2).value, "C": ws.cell(r, 3).value,
-                "D": ws.cell(r, 4).value, "E": ws.cell(r, 5).value,
-                "F": ws.cell(r, 6).value, "G": ws.cell(r, 7).value,
-                "H": ws.cell(r, 8).value, "I": ws.cell(r, 9).value,
-                "J": ws.cell(r, 10).value, "K": ws.cell(r, 11).value,
-                "L": ws.cell(r, 12).value, "M": ws.cell(r, 13).value,
-                "N": ws.cell(r, 14).value, "O": ws.cell(r, 15).value,
+                "B": leer_celda(ws, r, 2), "C": leer_celda(ws, r, 3),
+                "D": leer_celda(ws, r, 4), "E": leer_celda(ws, r, 5),
+                "F": leer_celda(ws, r, 6), "G": leer_celda(ws, r, 7),
+                "H": leer_celda(ws, r, 8), "I": leer_celda(ws, r, 9),
+                "J": leer_celda(ws, r, 10), "K": leer_celda(ws, r, 11),
+                "L": leer_celda(ws, r, 12), "M": leer_celda(ws, r, 13),
+                "N": leer_celda(ws, r, 14), "O": leer_celda(ws, r, 15),
             })
             r = fila_fin + 1
         else:
@@ -671,7 +685,7 @@ def actualizar_hoja(ws, datos, nombre_hoja):
     if efectivo_instr and gbm:
         efect_fila = None
         for r in range(fila_header + 1, fila_totales):
-            nombre_r = ws.cell(r, 1).value
+            nombre_r = leer_celda(ws, r, 1)
             if nombre_r and "EFECTIVO" in str(nombre_r).upper():
                 efect_fila = r
                 break
@@ -680,12 +694,12 @@ def actualizar_hoja(ws, datos, nombre_hoja):
             total_compras = sum(compras_map.values())
             total_ventas = sum(ventas_map.values())
             efect_b = round(max(0.0, old_efect_b + total_ventas - total_compras), 2)
-            ws.cell(efect_fila, 2).value = efect_b
+            actualizar_celda(ws, efect_fila, 2, efect_b)
 
     if periodo:
         actualizar_celda(ws, 2, 9, f"CORTE MENSUAL {periodo['mes_nombre']}", forzar=True)
         actualizar_celda(ws, 3, 9, periodo["periodo"], forzar=True)
-        k7 = ws.cell(7, 11).value
+        k7 = leer_celda(ws, 7, 11)
         if k7 and "\n" in str(k7):
             actualizar_celda(ws, 7, 11, f"RENDIMIENTO ANUAL\n{periodo['anio']}", forzar=True)
 
