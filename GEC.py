@@ -19,49 +19,78 @@ MESES = {
 MESES_INV = {v: k for k, v in MESES.items()}
 
 # ============================================================
-# ESCUDOS PARA CELDAS COMBINADAS (SOLUCIÓN A TU ERROR)
+# ESCUDOS PARA CELDAS COMBINADAS (LA OPCIÓN NUCLEAR)
 # ============================================================
 def leer_celda(ws, row, col):
-    """Lee el valor real incluso si la celda está combinada."""
+    """Lee el valor real de la celda, evadiendo celdas combinadas secundarias."""
+    for rng in ws.merged_cells.ranges:
+        if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
+            celda_maestra = ws.cell(rng.min_row, rng.min_col)
+            return getattr(celda_maestra, 'value', None)
     celda = ws.cell(row, col)
-    if type(celda).__name__ == 'MergedCell':
-        for rng in ws.merged_cells.ranges:
-            if rng.min_col <= col <= rng.max_col and rng.min_row <= row <= rng.max_row:
-                return ws.cell(rng.min_row, rng.min_col).value
-    return celda.value
+    return getattr(celda, 'value', None)
 
 def actualizar_celda(ws, row, col, value, forzar=False):
-    """Escribe en una celda de manera segura (descombina, escribe y re-combina)."""
-    val_actual = leer_celda(ws, row, col)
+    """
+    Escribe en la celda. Si openpyxl se bloquea por una celda combinada corrupta
+    (como el caso de SLV), aplica la opción nuclear para repararla en memoria.
+    """
+    target_row, target_col = row, col
+    rango_merge = None
     
-    # Preservar fórmulas existentes
+    # 1. Identificar si la celda pertenece a un rango combinado
+    for rng in ws.merged_cells.ranges:
+        if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
+            target_row, target_col = rng.min_row, rng.min_col
+            rango_merge = str(rng)
+            break
+
+    # 2. Respetar fórmulas existentes (a menos que se fuerce la escritura)
+    val_actual = leer_celda(ws, target_row, target_col)
     if not forzar and isinstance(val_actual, str) and str(val_actual).startswith("="):
         return
 
-    target_row, target_col = row, col
-    merge_range_str = None
+    celda = ws.cell(target_row, target_col)
     
-    for rng in list(ws.merged_cells.ranges):
-        if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
-            target_row, target_col = rng.min_row, rng.min_col
-            merge_range_str = str(rng)
-            break
-
-    if merge_range_str:
-        try: ws.unmerge_cells(merge_range_str)
-        except Exception: pass
-        
+    # 3. Intentar escritura normal
     try:
-        ws.cell(target_row, target_col).value = value
-    except Exception:
-        pass
+        celda.value = value
+    except AttributeError:
+        # 4. OPCIÓN NUCLEAR: openpyxl corrompió la celda. Vamos a forzar su reparación.
+        if rango_merge:
+            try: ws.unmerge_cells(rango_merge)
+            except Exception: pass
         
-    if merge_range_str:
-        try: ws.merge_cells(merge_range_str)
-        except Exception: pass
+        # Borrar el objeto corrupto de la memoria interna de la hoja
+        if (target_row, target_col) in ws._cells:
+            del ws._cells[(target_row, target_col)]
+            
+        # Al llamarla de nuevo, Excel crea una celda pura y limpia que acepta el valor
+        ws.cell(target_row, target_col).value = value
+        
+        # Restaurar el rango combinado exactamente como estaba
+        if rango_merge:
+            try: ws.merge_cells(rango_merge)
+            except Exception: pass
+
+def copiar_formato_fila(ws, fila_origen, fila_destino):
+    """Copia el estilo visual de la fila para las inserciones nuevas."""
+    from openpyxl.cell.cell import MergedCell
+    for col in range(1, 16):
+        src = ws.cell(fila_origen, col)
+        dst = ws.cell(fila_destino, col)
+        if isinstance(src, MergedCell) or isinstance(dst, MergedCell): continue
+        try:
+            dst.font = copy(src.font)
+            dst.fill = copy(src.fill)
+            dst.border = copy(src.border)
+            dst.number_format = src.number_format
+            dst.alignment = copy(src.alignment)
+        except AttributeError:
+            continue
 
 # ============================================================
-# FUNCIONES DE EXTRACCIÓN (TU LÓGICA INTACTA)
+# FUNCIONES DE EXTRACCIÓN Y LÓGICA (INTACTAS)
 # ============================================================
 def extraer_numeros(texto):
     nums = re.findall(r"[\d,]+\.\d+", texto)
@@ -324,9 +353,6 @@ def extraer_todos_los_pdfs_en_memoria(archivos_pdf):
             st.error(f"Error procesando el PDF: {e}")
     return clientes
 
-# ============================================================
-# FUNCIONES DE CONSOLIDACIÓN (TU LÓGICA INTACTA)
-# ============================================================
 def normalizar_instr(nombre):
     if not nombre or nombre == "-": return ""
     n = str(nombre).upper().strip()
@@ -342,7 +368,7 @@ ALIASES = {
     "FIBRAMQ 12": ["FIBRAMQ12"],
     "DAHANOS 13": ["DANHOS 13", "DANHOS13", "DAHANOS13"],
     "GLD":        ["GLD (ORO)", "GLD ORO"],
-    "SLV":        ["SLV (PLATA)", "SLV PLATA"],
+    "SLV":        ["SLV (PLATA)", "SLV PLATA", "SLV(PLATA)"],
     "MELI":       ["MELIN", "MELI"],
     "NFLX":       ["NFLX"],
     "FCFE 18":    ["FCFE18"],
@@ -373,21 +399,6 @@ def encontrar_fila(ws, texto_buscar, col=1, rango=(1, 50)):
 def valor_numerico(v, default=0.0):
     if isinstance(v, (int, float)): return float(v)
     return default
-
-def copiar_formato_fila(ws, fila_origen, fila_destino):
-    from openpyxl.cell.cell import MergedCell
-    for col in range(1, 16):
-        src = ws.cell(fila_origen, col)
-        dst = ws.cell(fila_destino, col)
-        if isinstance(src, MergedCell) or isinstance(dst, MergedCell): continue
-        try:
-            dst.font = copy(src.font)
-            dst.fill = copy(src.fill)
-            dst.border = copy(src.border)
-            dst.number_format = src.number_format
-            dst.alignment = copy(src.alignment)
-        except AttributeError:
-            continue
 
 def insertar_instrumento(ws, fila_totales, datos, fila_ref, periodo):
     ws.insert_rows(fila_totales)
@@ -730,14 +741,11 @@ def main():
     if st.button("🚀 Iniciar Consolidación", use_container_width=True):
         if maestro_file and pdf_files:
             try:
-                # 1. Cargar archivo Excel
                 wb = load_workbook(maestro_file)
                 
-                # 2. Procesar PDFs
                 with st.spinner("Extrayendo datos de PDFs..."):
                     clientes = extraer_todos_los_pdfs_en_memoria(pdf_files)
                 
-                # 3. Consolidar
                 with st.spinner("Actualizando archivo maestro..."):
                     clientes_actualizados = 0
                     for nombre_cliente, datos in sorted(clientes.items()):
@@ -749,7 +757,6 @@ def main():
                         else:
                             st.warning(f"⚠️ Cliente no encontrado en el Maestro: {nombre_cliente}")
                 
-                # 4. Descargar
                 output = io.BytesIO()
                 wb.save(output)
                 output.seek(0)
